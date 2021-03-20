@@ -8,10 +8,13 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/replit/database-go"
 )
 
 type DBFS struct {
 	fs.Inode
+
+	keys []string
 }
 
 type KeyFile struct {
@@ -19,22 +22,26 @@ type KeyFile struct {
 }
 
 func (r *DBFS) OnAdd(ctx context.Context) {
-	ch := r.NewPersistentInode(
-		ctx,
-		&KeyFile{
-			fs.MemRegularFile{
-				Data: []byte("Hello world"),
-				Attr: fuse.Attr{
-					// default file permissions: -rw-rw-r--
-					Mode: 0664,
+	for _, k := range r.keys {
+		// for each key, add a regular file with the filename being the key.
+		ch := r.NewPersistentInode(
+			ctx,
+			&KeyFile{
+				fs.MemRegularFile{
+					Data: []byte("Hello world"),
+					Attr: fuse.Attr{
+						// default file permissions: -rw-rw-r--
+						Mode: 0664,
+					},
 				},
 			},
-		},
-		fs.StableAttr{
-			Mode: fuse.S_IFREG,
-			Ino:  2,
-		})
-	r.AddChild("hello.txt", ch, false)
+			fs.StableAttr{
+				Mode: fuse.S_IFREG,
+				// Inode = 0 means autogenerate an inode number
+				Ino: 0,
+			})
+		r.AddChild(k, ch, false)
+	}
 }
 
 func (r *DBFS) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -54,13 +61,24 @@ func main() {
 	}
 	mountpoint := flag.Arg(0)
 
+	// Can fetch the keys every time the directory list happens, but prefetching keys is
+	//  much faster. (Need to consider this further.)
+	keys, err := database.ListKeys("")
+	if err != nil {
+		log.Fatalf("Error fetching intial database keys: %s\n", err)
+	}
+
+	dbfs := &DBFS{
+		keys: keys,
+	}
+
 	opts := &fs.Options{}
 	opts.Debug = *debug
 
 	if *debug {
 		log.Printf("Mounting on %s\n", mountpoint)
 	}
-	server, err := fs.Mount(mountpoint, &DBFS{}, opts)
+	server, err := fs.Mount(mountpoint, dbfs, opts)
 	if err != nil {
 		log.Fatalf("Mount fail: %v\n", err)
 	}
