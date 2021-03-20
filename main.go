@@ -25,7 +25,8 @@ func (r *DBFS) OnAdd(ctx context.Context) {
 			fs.MemRegularFile{
 				Data: []byte("Hello world"),
 				Attr: fuse.Attr{
-					Mode: 0644,
+					// default file permissions: -rw-rw-r--
+					Mode: 0664,
 				},
 			},
 		},
@@ -37,6 +38,7 @@ func (r *DBFS) OnAdd(ctx context.Context) {
 }
 
 func (r *DBFS) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	// default directory permissions: drwxrwxr-x
 	out.Mode = 0755
 	return 0
 }
