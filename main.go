@@ -21,37 +21,24 @@ type KeyFile struct {
 	fs.MemRegularFile
 }
 
-func (r *DBFS) OnAdd(ctx context.Context) {
-	for _, k := range r.keys {
-		// for each key, add a regular file with the filename being the key.
-		ch := r.NewPersistentInode(
-			ctx,
-			&KeyFile{
-				fs.MemRegularFile{
-					Data: []byte("Hello world"),
-					Attr: fuse.Attr{
-						// default file permissions: -rw-rw-r--
-						Mode: 0664,
-					},
-				},
-			},
-			fs.StableAttr{
-				Mode: fuse.S_IFREG,
-				// Inode = 0 means autogenerate an inode number
-				Ino: 0,
-			})
-		r.AddChild(k, ch, false)
-	}
-}
-
 func (r *DBFS) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	// default directory permissions: drwxrwxr-x
 	out.Mode = 0755
 	return 0
 }
 
+func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	entries := make([]fuse.DirEntry, 1)
+	entries[0] = fuse.DirEntry{
+		Name: "abc",
+		Ino:  0,
+		Mode: 0664,
+	}
+	return fs.NewListDirStream(entries), fs.OK
+}
+
 var _ = (fs.NodeGetattrer)((*DBFS)(nil))
-var _ = (fs.NodeOnAdder)((*DBFS)(nil))
+var _ = (fs.NodeReaddirer)((*DBFS)(nil))
 
 func main() {
 	debug := flag.Bool("debug", false, "print debug data")
