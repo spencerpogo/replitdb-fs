@@ -22,7 +22,7 @@ func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	entries[0] = fuse.DirEntry{
 		Name: "abc",
 		Ino:  0,
-		Mode: 0664,
+		Mode: FILE_MODE,
 	}
 	return fs.NewListDirStream(entries), fs.OK
 }
@@ -35,7 +35,7 @@ func (r *DBFS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 	}
 
 	stable := fs.StableAttr{
-		Mode: 0664,
+		Mode: FILE_MODE,
 		Ino:  0,
 	}
 	operations := &DBFS{}
