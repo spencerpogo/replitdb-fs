@@ -14,4 +14,8 @@
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
+# Where I build binaries to
 build/
+
+# Where I mount the filesystem
+mnt/
