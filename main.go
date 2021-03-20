@@ -41,7 +41,9 @@ func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 var _ = (fs.NodeReaddirer)((*DBFS)(nil))
 
 func (r *DBFS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	if name != "abc" {
+	// Ensure that the key exists
+	_, err := database.Get(name)
+	if err == database.ErrNotFound {
 		return nil, syscall.ENOENT
 	}
 
