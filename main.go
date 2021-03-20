@@ -10,17 +10,12 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
+const DIR_MODE = 0755  // drwxrwxr-x
+const FILE_MODE = 0664 // -rw-rw-r--
+
 type DBFS struct {
 	fs.Inode
 }
-
-func (r *DBFS) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	// default directory permissions: drwxrwxr-x
-	out.Mode = 0755
-	return 0
-}
-
-var _ = (fs.NodeGetattrer)((*DBFS)(nil))
 
 func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	entries := make([]fuse.DirEntry, 1)
