@@ -8,17 +8,10 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/replit/database-go"
 )
 
 type DBFS struct {
 	fs.Inode
-
-	keys []string
-}
-
-type KeyFile struct {
-	fs.MemRegularFile
 }
 
 func (r *DBFS) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -26,6 +19,8 @@ func (r *DBFS) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut)
 	out.Mode = 0755
 	return 0
 }
+
+var _ = (fs.NodeGetattrer)((*DBFS)(nil))
 
 func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	entries := make([]fuse.DirEntry, 1)
@@ -37,8 +32,27 @@ func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	return fs.NewListDirStream(entries), fs.OK
 }
 
-var _ = (fs.NodeGetattrer)((*DBFS)(nil))
 var _ = (fs.NodeReaddirer)((*DBFS)(nil))
+
+func (r *DBFS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if name != "abc" {
+		return nil, syscall.ENOENT
+	}
+
+	stable := fs.StableAttr{
+		Mode: 0664,
+		Ino:  0,
+	}
+	operations := &DBFS{}
+
+	child := r.NewInode(ctx, operations, stable)
+
+	// In case of concurrent lookup requests, it can happen that operations !=
+	// child.Operations().
+	return child, 0
+}
+
+var _ = (fs.NodeLookuper)((*DBFS)(nil))
 
 func main() {
 	debug := flag.Bool("debug", false, "print debug data")
@@ -48,16 +62,7 @@ func main() {
 	}
 	mountpoint := flag.Arg(0)
 
-	// Can fetch the keys every time the directory list happens, but prefetching keys is
-	//  much faster. (Need to consider this further.)
-	keys, err := database.ListKeys("")
-	if err != nil {
-		log.Fatalf("Error fetching intial database keys: %s\n", err)
-	}
-
-	dbfs := &DBFS{
-		keys: keys,
-	}
+	dbfs := &DBFS{}
 
 	opts := &fs.Options{}
 	opts.Debug = *debug
