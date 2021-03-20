@@ -14,15 +14,26 @@ type DBFS struct {
 	fs.Inode
 }
 
+type KeyFile struct {
+	fs.MemRegularFile
+}
+
 func (r *DBFS) OnAdd(ctx context.Context) {
 	ch := r.NewPersistentInode(
-		ctx, &fs.MemRegularFile{
-			Data: []byte("file.txt"),
-			Attr: fuse.Attr{
-				Mode: 0644,
+		ctx,
+		&KeyFile{
+			fs.MemRegularFile{
+				Data: []byte("Hello world"),
+				Attr: fuse.Attr{
+					Mode: 0644,
+				},
 			},
-		}, fs.StableAttr{Ino: 2})
-	r.AddChild("file.txt", ch, false)
+		},
+		fs.StableAttr{
+			Mode: fuse.S_IFREG,
+			Ino:  2,
+		})
+	r.AddChild("hello.txt", ch, false)
 }
 
 func (r *DBFS) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
