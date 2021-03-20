@@ -8,6 +8,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/replit/database-go"
 )
 
 const DIR_MODE = 0755  // drwxrwxr-x
@@ -18,12 +19,22 @@ type DBFS struct {
 }
 
 func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	entries := make([]fuse.DirEntry, 1)
-	entries[0] = fuse.DirEntry{
-		Name: "abc",
-		Ino:  0,
-		Mode: FILE_MODE,
+	// List everything in the database
+	keys, err := database.ListKeys("")
+	if err != nil {
+		log.Printf("Error while listing database keys: %s\n", err)
+		return nil, syscall.EAGAIN
 	}
+
+	entries := make([]fuse.DirEntry, len(keys))
+	for i, k := range keys {
+		entries[i] = fuse.DirEntry{
+			Name: k,
+			Ino:  0, // 0 = auto-generate the number
+			Mode: FILE_MODE,
+		}
+	}
+
 	return fs.NewListDirStream(entries), fs.OK
 }
 
