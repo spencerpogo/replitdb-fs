@@ -62,6 +62,17 @@ func (r *DBFS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 
 var _ = (fs.NodeLookuper)((*DBFS)(nil))
 
+func (r *DBFS) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	// disallow writes (for now)
+	if fuseFlags&(syscall.O_RDWR|syscall.O_WRONLY) != 0 {
+		return nil, 0, syscall.EROFS
+	}
+
+	return nil, 0, syscall.EAGAIN
+}
+
+var _ = (fs.NodeOpener)((*DBFS)(nil))
+
 func main() {
 	debug := flag.Bool("debug", false, "print debug data")
 	flag.Parse()
