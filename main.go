@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"sync"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -16,6 +17,14 @@ const FILE_MODE = 0664 // -rw-rw-r--
 
 type DBFS struct {
 	fs.Inode
+}
+
+type KeyFile struct {
+	fs.Inode
+
+	key     string
+	mu      sync.Mutex
+	content []byte
 }
 
 func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
@@ -46,7 +55,7 @@ func (r *DBFS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 	if err == database.ErrNotFound {
 		return nil, syscall.ENOENT
 	} else if err != nil {
-		log.Printf("Error stating database key %s: %s", name, err)
+		log.Printf("Error STATing database key %s: %s", name, err)
 		return nil, syscall.EAGAIN
 	}
 
@@ -54,7 +63,7 @@ func (r *DBFS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 		Mode: FILE_MODE,
 		Ino:  0,
 	}
-	operations := &DBFS{}
+	operations := &KeyFile{key: name}
 
 	child := r.NewInode(ctx, operations, stable)
 
@@ -65,16 +74,50 @@ func (r *DBFS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 
 var _ = (fs.NodeLookuper)((*DBFS)(nil))
 
-func (r *DBFS) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+// bytesFileHandle is a file handle that has it's contents stored in memory
+type bytesFileHandle struct {
+	content []byte
+}
+
+// bytesFileHandle allows reads
+var _ = (fs.FileReader)((*bytesFileHandle)(nil))
+
+func (fh *bytesFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	end := off + int64(len(dest))
+	if end > int64(len(fh.content)) {
+		end = int64(len(fh.content))
+	}
+
+	// We could copy to the `dest` buffer, but since we have a
+	// []byte already, return that.
+	return fuse.ReadResultData(fh.content[off:end]), 0
+}
+
+func (f *KeyFile) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	// disallow writes (for now)
 	if fuseFlags&(syscall.O_RDWR|syscall.O_WRONLY) != 0 {
 		return nil, 0, syscall.EROFS
 	}
 
-	return nil, 0, syscall.EAGAIN
+	// Read key
+	log.Printf("Open()ing database key %s\n", f.key)
+	val, err := database.Get(f.key)
+	if err != nil {
+		if err == database.ErrNotFound {
+			return nil, 0, syscall.ENOENT
+		} else {
+			log.Printf("Error reading database key %s: %s", f.key, err)
+			return nil, 0, syscall.EAGAIN
+		}
+	}
+
+	fh = &bytesFileHandle{content: []byte(val)}
+
+	// Return FOPEN_DIRECT_IO so content is not cached.
+	return fh, fuse.FOPEN_DIRECT_IO, syscall.F_OK
 }
 
-var _ = (fs.NodeOpener)((*DBFS)(nil))
+var _ = (fs.NodeOpener)((*KeyFile)(nil))
 
 func main() {
 	debug := flag.Bool("debug", false, "print debug data")
