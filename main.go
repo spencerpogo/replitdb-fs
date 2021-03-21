@@ -45,6 +45,9 @@ func (r *DBFS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 	_, err := database.Get(name)
 	if err == database.ErrNotFound {
 		return nil, syscall.ENOENT
+	} else if err != nil {
+		log.Printf("Error stating database key %s: %s", name, err)
+		return nil, syscall.EAGAIN
 	}
 
 	stable := fs.StableAttr{
