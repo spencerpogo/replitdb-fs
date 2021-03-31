@@ -21,6 +21,10 @@ const FILE_MODE = 0664 // -rw-rw-r--
 type DBFS struct {
 	fs.Inode
 
+	// A cache of the current list of keys in the database.
+	// It is re-populated with fresh data every time READDIR is called on the filessystem
+	//  and on a loop every CACHE_LIFETIME (re-populating will delay the auto-refresh).
+	// The cache is used to respond to STAT requests.
 	keysCache   []string
 	flushTicker *time.Ticker
 }
