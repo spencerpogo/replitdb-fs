@@ -35,14 +35,18 @@ func NewDBFS() DBFS {
 	}
 }
 
+func (d *DBFS) ResetFlushTicker() {
+	if d.flushTicker != nil {
+		d.flushTicker.Reset(CACHE_LIFETIME)
+	}
+}
+
 func (d *DBFS) FlushCache() error {
 	log.Println("Flushing key cache")
 
 	// If the cache is being flushed now, reset the flush ticker so that it isn't
 	//  needlessly flushed
-	if d.flushTicker != nil {
-		d.flushTicker.Reset(CACHE_LIFETIME)
-	}
+	d.ResetFlushTicker()
 
 	keys, err := database.ListKeys("")
 	if err != nil {
@@ -91,7 +95,7 @@ func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		entries[i] = fuse.DirEntry{
 			Name: k,
 			Ino:  0, // 0 = auto-generate the number
-			Mode: FILE_MODE,
+			Mode: fuse.S_IFREG,
 		}
 	}
 
@@ -113,7 +117,7 @@ func NewKeyFile(fs *DBFS, key string) KeyFile {
 
 func (r *DBFS) NewKeyInode(ctx context.Context, key string) *fs.Inode {
 	stable := fs.StableAttr{
-		Mode: FILE_MODE,
+		Mode: fuse.S_IFREG,
 		Ino:  0,
 	}
 	operations := &KeyFile{key: key}
