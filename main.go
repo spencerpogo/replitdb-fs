@@ -15,9 +15,6 @@ import (
 
 const CACHE_LIFETIME = 5 * time.Second
 
-const DIR_MODE = 0755  // drwxrwxr-x
-const FILE_MODE = 0664 // -rw-rw-r--
-
 type DBFS struct {
 	fs.Inode
 
@@ -105,10 +102,8 @@ func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 type KeyFile struct {
 	fs.Inode
 
-	fs      *DBFS
-	key     string
-	mu      sync.Mutex
-	content []byte
+	fs  *DBFS
+	key string
 }
 
 func NewKeyFile(fs *DBFS, key string) KeyFile {
@@ -120,9 +115,9 @@ func (r *DBFS) NewKeyInode(ctx context.Context, key string) *fs.Inode {
 		Mode: fuse.S_IFREG,
 		Ino:  0,
 	}
-	operations := &KeyFile{key: key}
+	operations := NewKeyFile(r, key)
 
-	child := r.NewInode(ctx, operations, stable)
+	child := r.NewInode(ctx, &operations, stable)
 
 	// In case of concurrent lookup requests, it can happen that operations !=
 	// child.Operations().
@@ -238,30 +233,16 @@ func (f *KeyWriter) Flush(ctx context.Context) syscall.Errno {
 }
 
 // Implement GetAttr to provide size
-var _ = (fs.NodeGetattrer)((*KeyWriter)(nil))
+var _ = (fs.NodeGetattrer)((*KeyFile)(nil))
 
-func (bn *KeyWriter) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	bn.mu.Lock()
-	defer bn.mu.Unlock()
-	bn.getattr(out)
+func (bn *KeyFile) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	return 0
 }
 
-func (f *KeyWriter) getattr(out *fuse.AttrOut) {
-	out.Size = uint64(len(f.content))
-}
-
 // Implement Setattr to support truncation
-var _ = (fs.NodeSetattrer)((*KeyWriter)(nil))
+var _ = (fs.NodeSetattrer)((*KeyFile)(nil))
 
-func (f *KeyWriter) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	if sz, ok := in.GetSize(); ok {
-		f.Resize(sz)
-	}
-	f.getattr(out)
+func (f *KeyFile) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	return 0
 }
 
@@ -281,14 +262,15 @@ func (r *DBFS) Create(
 ) (node *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	child := r.NewKeyInode(ctx, name)
 	writer := NewKeyWriter(r, name)
+	log.Printf("Creating key %s\n", name)
 	return child, writer, fuse.FOPEN_NONSEEKABLE | fuse.FOPEN_DIRECT_IO, syscall.F_OK
 }
 
 var _ = (fs.NodeOpener)((*KeyFile)(nil))
 
 func (f *KeyFile) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
-	log.Printf("Open flags: %d\n", fuseFlags)
-	if fuseFlags&(syscall.O_RDWR|syscall.O_WRONLY) != 0 {
+	log.Printf("Open flags: %d\n", flags)
+	if flags&(syscall.O_RDWR|syscall.O_WRONLY) != 0 {
 		return f.OpenWrite(ctx)
 	} else {
 		return f.OpenRead(ctx)
