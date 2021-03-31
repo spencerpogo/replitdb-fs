@@ -99,6 +99,26 @@ func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	return fs.NewListDirStream(entries), fs.OK
 }
 
+var _ = (fs.NodeAccesser)((*KeyFile)(nil))
+
+func (r *KeyFile) Access(ctx context.Context, mask uint32) syscall.Errno {
+	// Anyone can access this filesystem (ignore permission checks).
+	// This squelches the confirm prompt from rm when trying to remove a key because the prompt is
+	//  caused by a lack of write permissions
+	return syscall.F_OK
+}
+
+var _ = (fs.NodeUnlinker)((*DBFS)(nil))
+
+func (r *DBFS) Unlink(ctx context.Context, name string) syscall.Errno {
+	// No need to check for existence
+	err := database.Delete(name)
+	if err != nil {
+		panic(err)
+	}
+	return syscall.F_OK
+}
+
 type KeyFile struct {
 	fs.Inode
 
