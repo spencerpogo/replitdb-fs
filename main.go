@@ -147,12 +147,7 @@ type KeyFile struct {
 	content []byte
 }
 
-func (f *KeyFile) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
-	// disallow writes (for now)
-	if fuseFlags&(syscall.O_RDWR|syscall.O_WRONLY) != 0 {
-		return nil, 0, syscall.EROFS
-	}
-
+func (f *KeyFile) OpenRead(ctx context.Context) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	// Read key
 	log.Printf("Open()ing database key %s\n", f.key)
 	val, err := database.Get(f.key)
@@ -169,6 +164,15 @@ func (f *KeyFile) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fus
 
 	// Return FOPEN_DIRECT_IO so content is not cached.
 	return fh, fuse.FOPEN_DIRECT_IO, syscall.F_OK
+}
+
+func (f *KeyFile) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	// disallow writes (for now)
+	if fuseFlags&(syscall.O_RDWR|syscall.O_WRONLY) != 0 {
+		return nil, 0, syscall.EROFS
+	}
+
+	return f.OpenRead(ctx)
 }
 
 var _ = (fs.NodeOpener)((*KeyFile)(nil))
