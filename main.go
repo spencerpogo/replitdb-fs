@@ -6,34 +6,79 @@ import (
 	"log"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/replit/database-go"
 )
 
+const CACHE_LIFETIME = 5 * time.Second
+
 const DIR_MODE = 0755  // drwxrwxr-x
 const FILE_MODE = 0664 // -rw-rw-r--
 
 type DBFS struct {
 	fs.Inode
+
+	keysCache   []string
+	flushTicker *time.Ticker
 }
 
-type KeyFile struct {
-	fs.Inode
+func NewDBFS() DBFS {
+	return DBFS{
+		keysCache: make([]string, 0),
+	}
+}
 
-	key     string
-	mu      sync.Mutex
-	content []byte
+func (d *DBFS) FlushCache() error {
+	log.Println("Flushing key cache")
+
+	// If the cache is being flushed now, reset the flush ticker so that it isn't
+	//  needlessly flushed
+	if d.flushTicker != nil {
+		d.flushTicker.Reset(CACHE_LIFETIME)
+	}
+
+	keys, err := database.ListKeys("")
+	if err != nil {
+		return err
+	}
+	d.keysCache = keys
+	return nil
+}
+
+func (d *DBFS) CacheFlushLoop(quit chan bool) {
+	ticker := time.NewTicker(CACHE_LIFETIME)
+	d.flushTicker = ticker
+	for {
+		select {
+		case <-quit:
+			ticker.Stop()
+			return
+		case <-ticker.C:
+			err := d.FlushCache()
+			if err != nil {
+				panic(err)
+			}
+		}
+	}
+}
+
+func (d *DBFS) KeyInCache(target string) bool {
+	for _, k := range d.keysCache {
+		if k == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	// List everything in the database
-	keys, err := database.ListKeys("")
-	if err != nil {
-		log.Printf("Error while listing database keys: %s\n", err)
-		return nil, syscall.EAGAIN
-	}
+	// Readdir should be a way to invalidate the cache immediately and it should show the
+	//  latest data, so flush cache immediately whenever this is called
+	r.FlushCache()
+	keys := r.keysCache
 
 	entries := make([]fuse.DirEntry, len(keys))
 	for i, k := range keys {
@@ -50,13 +95,10 @@ func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 var _ = (fs.NodeReaddirer)((*DBFS)(nil))
 
 func (r *DBFS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	log.Printf("STATing key %s\n", name)
 	// Ensure that the key exists
-	_, err := database.Get(name)
-	if err == database.ErrNotFound {
+	if !r.KeyInCache(name) {
 		return nil, syscall.ENOENT
-	} else if err != nil {
-		log.Printf("Error STATing database key %s: %s", name, err)
-		return nil, syscall.EAGAIN
 	}
 
 	stable := fs.StableAttr{
@@ -93,6 +135,14 @@ func (fh *bytesFileHandle) Read(ctx context.Context, dest []byte, off int64) (fu
 	return fuse.ReadResultData(fh.content[off:end]), 0
 }
 
+type KeyFile struct {
+	fs.Inode
+
+	key     string
+	mu      sync.Mutex
+	content []byte
+}
+
 func (f *KeyFile) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	// disallow writes (for now)
 	if fuseFlags&(syscall.O_RDWR|syscall.O_WRONLY) != 0 {
@@ -127,7 +177,16 @@ func main() {
 	}
 	mountpoint := flag.Arg(0)
 
-	dbfs := &DBFS{}
+	dbfs := NewDBFS()
+
+	// CacheFlushLoop waits for CACHE_LIFETIME before the first flush, so do it now to
+	//  ensure that cache is fresh and we catch errors (such as missing DB url) early
+	err := dbfs.FlushCache()
+	if err != nil {
+		log.Fatalf("Error populating keys cache: %s\n", err)
+	}
+	cacheFlushQuit := make(chan bool)
+	go dbfs.CacheFlushLoop(cacheFlushQuit)
 
 	opts := &fs.Options{}
 	opts.Debug = *debug
@@ -135,9 +194,10 @@ func main() {
 	if *debug {
 		log.Printf("Mounting on %s\n", mountpoint)
 	}
-	server, err := fs.Mount(mountpoint, dbfs, opts)
+	server, err := fs.Mount(mountpoint, &dbfs, opts)
 	if err != nil {
 		log.Fatalf("Mount fail: %v\n", err)
 	}
 	server.Wait()
+	cacheFlushQuit <- true
 }
