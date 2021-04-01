@@ -15,30 +15,28 @@ import (
 
 const CACHE_LIFETIME = 5 * time.Second
 
-type DBFS struct {
-	fs.Inode
-
+type Cache struct {
 	// A cache of the current list of keys in the database.
 	// It is re-populated with fresh data every time READDIR is called on the filessystem
 	//  and on a loop every CACHE_LIFETIME (re-populating will delay the auto-refresh).
 	// The cache is used to respond to STAT requests.
-	keysCache   []string
+	keys        []string
 	flushTicker *time.Ticker
 }
 
-func NewDBFS() DBFS {
-	return DBFS{
-		keysCache: make([]string, 0),
+func NewCache() Cache {
+	return Cache{
+		keys: make([]string, 0),
 	}
 }
 
-func (d *DBFS) ResetFlushTicker() {
+func (d *Cache) ResetFlushTicker() {
 	if d.flushTicker != nil {
 		d.flushTicker.Reset(CACHE_LIFETIME)
 	}
 }
 
-func (d *DBFS) FlushCache() error {
+func (d *Cache) Flush() error {
 	log.Println("Flushing key cache")
 
 	// If the cache is being flushed now, reset the flush ticker so that it isn't
@@ -49,11 +47,11 @@ func (d *DBFS) FlushCache() error {
 	if err != nil {
 		return err
 	}
-	d.keysCache = keys
+	d.keys = keys
 	return nil
 }
 
-func (d *DBFS) CacheFlushLoop(quit chan bool) {
+func (d *Cache) CacheFlushLoop(quit chan bool) {
 	ticker := time.NewTicker(CACHE_LIFETIME)
 	d.flushTicker = ticker
 	for {
@@ -62,7 +60,7 @@ func (d *DBFS) CacheFlushLoop(quit chan bool) {
 			ticker.Stop()
 			return
 		case <-ticker.C:
-			err := d.FlushCache()
+			err := d.Flush()
 			if err != nil {
 				panic(err)
 			}
@@ -70,8 +68,8 @@ func (d *DBFS) CacheFlushLoop(quit chan bool) {
 	}
 }
 
-func (d *DBFS) KeyInCache(target string) bool {
-	for _, k := range d.keysCache {
+func (d *Cache) KeyInCache(target string) bool {
+	for _, k := range d.keys {
 		if k == target {
 			return true
 		}
@@ -79,13 +77,24 @@ func (d *DBFS) KeyInCache(target string) bool {
 	return false
 }
 
-var _ = (fs.NodeReaddirer)((*DBFS)(nil))
+type KeyDir struct {
+	fs.Inode
 
-func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	cache *Cache
+	path  string
+}
+
+func NewKeyDir(cache *Cache, path string) *KeyDir {
+	return &KeyDir{cache: cache, path: path}
+}
+
+var _ = (fs.NodeReaddirer)((*KeyDir)(nil))
+
+func (r *KeyDir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	// Readdir should be a way to invalidate the cache immediately and it should show the
 	//  latest data, so flush cache immediately whenever this is called
-	r.FlushCache()
-	keys := r.keysCache
+	r.cache.Flush()
+	keys := r.cache.keys
 
 	entries := make([]fuse.DirEntry, len(keys))
 	for i, k := range keys {
@@ -99,20 +108,11 @@ func (r *DBFS) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	return fs.NewListDirStream(entries), fs.OK
 }
 
-var _ = (fs.NodeAccesser)((*KeyFile)(nil))
+var _ = (fs.NodeUnlinker)((*KeyDir)(nil))
 
-func (r *KeyFile) Access(ctx context.Context, mask uint32) syscall.Errno {
-	// Anyone can access this filesystem (ignore permission checks).
-	// This squelches the confirm prompt from rm when trying to remove a key because the prompt is
-	//  caused by a lack of write permissions
-	return syscall.F_OK
-}
-
-var _ = (fs.NodeUnlinker)((*DBFS)(nil))
-
-func (r *DBFS) Unlink(ctx context.Context, name string) syscall.Errno {
+func (r *KeyDir) Unlink(ctx context.Context, name string) syscall.Errno {
 	// No need to check for existence
-	err := database.Delete(name)
+	err := database.Delete(r.path + name)
 	if err != nil {
 		panic(err)
 	}
@@ -122,15 +122,15 @@ func (r *DBFS) Unlink(ctx context.Context, name string) syscall.Errno {
 type KeyFile struct {
 	fs.Inode
 
-	fs  *DBFS
-	key string
+	parent *KeyDir
+	key    string
 }
 
-func NewKeyFile(fs *DBFS, key string) KeyFile {
-	return KeyFile{fs: fs, key: key}
+func NewKeyFile(parent *KeyDir, key string) KeyFile {
+	return KeyFile{parent: parent, key: key}
 }
 
-func (r *DBFS) NewKeyInode(ctx context.Context, key string) *fs.Inode {
+func (r *KeyDir) NewKeyInode(ctx context.Context, key string) *fs.Inode {
 	stable := fs.StableAttr{
 		Mode: fuse.S_IFREG,
 		Ino:  0,
@@ -144,17 +144,27 @@ func (r *DBFS) NewKeyInode(ctx context.Context, key string) *fs.Inode {
 	return child
 }
 
-func (r *DBFS) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	log.Printf("STATing key %s\n", name)
+var _ = (fs.NodeLookuper)((*KeyDir)(nil))
+
+func (r *KeyDir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	key := r.path + name
+	log.Printf("STATing key %s\n", key)
 	// Ensure that the key exists
-	if !r.KeyInCache(name) {
-		return nil, syscall.ENOENT
+	if r.cache.KeyInCache(key) {
+		return r.NewKeyInode(ctx, key), 0
 	}
 
-	return r.NewKeyInode(ctx, name), 0
+	return nil, syscall.ENOENT
 }
 
-var _ = (fs.NodeLookuper)((*DBFS)(nil))
+var _ = (fs.NodeAccesser)((*KeyFile)(nil))
+
+func (r *KeyFile) Access(ctx context.Context, mask uint32) syscall.Errno {
+	// Anyone can access this filesystem (ignore permission checks).
+	// This squelches the confirm prompt from rm when trying to remove a key because the prompt is
+	//  caused by a lack of write permissions
+	return syscall.F_OK
+}
 
 // bytesFileHandle is a file handle that has it's contents stored in memory
 type bytesFileHandle struct {
@@ -197,14 +207,14 @@ func (f *KeyFile) OpenRead(ctx context.Context) (fh fs.FileHandle, fuseFlags uin
 type KeyWriter struct {
 	fs.Inode
 
-	fs      *DBFS
+	parent  *KeyDir
 	key     string
 	mu      sync.Mutex
 	content []byte
 }
 
-func NewKeyWriter(fs *DBFS, key string) *KeyWriter {
-	return &KeyWriter{fs: fs, key: key}
+func NewKeyWriter(parent *KeyDir, key string) *KeyWriter {
+	return &KeyWriter{parent: parent, key: key}
 }
 
 func (bn *KeyWriter) Resize(sz uint64) {
@@ -247,7 +257,7 @@ func (f *KeyWriter) Flush(ctx context.Context) syscall.Errno {
 		panic(err)
 	}
 	// Re-populate the cache so that future STATs have this key
-	f.fs.FlushCache()
+	f.parent.cache.Flush()
 
 	return syscall.F_OK
 }
@@ -267,20 +277,20 @@ func (f *KeyFile) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAtt
 }
 
 // Implement Setattr to make some applications happy
-var _ = (fs.NodeSetattrer)((*DBFS)(nil))
+var _ = (fs.NodeSetattrer)((*KeyDir)(nil))
 
-func (f *DBFS) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+func (f *KeyDir) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	return 0
 }
 
 func (f *KeyFile) OpenWrite(ctx context.Context) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	log.Printf("Opening key %s for writing\n", f.key)
-	return NewKeyWriter(f.fs, f.key), fuse.FOPEN_NONSEEKABLE, syscall.F_OK
+	return NewKeyWriter(f.parent, f.key), fuse.FOPEN_NONSEEKABLE, syscall.F_OK
 }
 
-var _ = (fs.NodeCreater)((*DBFS)(nil))
+var _ = (fs.NodeCreater)((*KeyDir)(nil))
 
-func (r *DBFS) Create(
+func (r *KeyDir) Create(
 	ctx context.Context,
 	name string,
 	flags uint32,
@@ -312,16 +322,17 @@ func main() {
 	}
 	mountpoint := flag.Arg(0)
 
-	dbfs := NewDBFS()
-
+	cache := NewCache()
 	// CacheFlushLoop waits for CACHE_LIFETIME before the first flush, so do it now to
 	//  ensure that cache is fresh and we catch errors (such as missing DB url) early
-	err := dbfs.FlushCache()
+	err := cache.Flush()
 	if err != nil {
 		log.Fatalf("Error populating keys cache: %s\n", err)
 	}
 	cacheFlushQuit := make(chan bool)
-	go dbfs.CacheFlushLoop(cacheFlushQuit)
+	go cache.CacheFlushLoop(cacheFlushQuit)
+
+	root := NewKeyDir(&cache, "")
 
 	opts := &fs.Options{}
 	opts.Debug = *debug
@@ -329,7 +340,7 @@ func main() {
 	if *debug {
 		log.Printf("Mounting on %s\n", mountpoint)
 	}
-	server, err := fs.Mount(mountpoint, &dbfs, opts)
+	server, err := fs.Mount(mountpoint, root, opts)
 	if err != nil {
 		log.Fatalf("Mount fail: %v\n", err)
 	}
