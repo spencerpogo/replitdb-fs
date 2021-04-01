@@ -266,6 +266,13 @@ func (f *KeyFile) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAtt
 	return 0
 }
 
+// Implement Setattr to make some applications happy
+var _ = (fs.NodeSetattrer)((*DBFS)(nil))
+
+func (f *DBFS) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	return 0
+}
+
 func (f *KeyFile) OpenWrite(ctx context.Context) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	log.Printf("Opening key %s for writing\n", f.key)
 	return NewKeyWriter(f.fs, f.key), fuse.FOPEN_NONSEEKABLE, syscall.F_OK
