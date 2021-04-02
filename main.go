@@ -237,7 +237,7 @@ var _ = (fs.NodeUnlinker)((*KeyDir)(nil))
 func (r *KeyDir) Unlink(ctx context.Context, name string) syscall.Errno {
 	// No need to check for existence
 	// See above warnings about urlencoding
-	err := database.Delete(url.PathEscape(MakeKey(r.path, name)))
+	err := database.Delete(url.PathEscape(r.Key(name)))
 	if err != nil {
 		panic(err)
 	}
@@ -254,10 +254,6 @@ type KeyFile struct {
 
 func NewKeyFile(parent *KeyDir, key string) KeyFile {
 	return KeyFile{parent: parent, key: key}
-}
-
-func MakeKey(ppath string, key string) string {
-	return ppath + key
 }
 
 func (r *KeyDir) NewKeyDirInode(ctx context.Context, name string) *fs.Inode {
@@ -302,6 +298,10 @@ func (r *KeyDir) DirExists(key string) bool {
 	return false
 }
 
+func (r *KeyDir) Key(name string) string {
+	return r.path + name
+}
+
 var _ = (fs.NodeLookuper)((*KeyDir)(nil))
 
 func (r *KeyDir) Lookup(
@@ -309,7 +309,7 @@ func (r *KeyDir) Lookup(
 	name string,
 	out *fuse.EntryOut,
 ) (*fs.Inode, syscall.Errno) {
-	key := MakeKey(r.path, name)
+	key := r.Key(name)
 	log.Printf("STATing key %s\n", key)
 	// Ensure that the key exists
 	if r.cache.KeyInCache(key) {
@@ -331,7 +331,7 @@ func (r *KeyDir) Mkdir(
 	mode uint32,
 	out *fuse.EntryOut,
 ) (*fs.Inode, syscall.Errno) {
-	key := MakeKey(r.path, name) + "/"
+	key := r.Key(name) + "/"
 	log.Printf("KeyDir %s: Mkdir %s with mode %d => key %s\n", r.path, name, mode, key)
 	// temporary HACK: client does not URL encode keys so do it ourself
 	// remove this once the library starts encoding so we don't double encode
