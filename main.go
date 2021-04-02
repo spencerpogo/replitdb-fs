@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
+	"net/url"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -43,10 +46,22 @@ func (d *Cache) Flush() error {
 	//  needlessly flushed
 	d.ResetFlushTicker()
 
-	keys, err := database.ListKeys("")
+	escapedKeys, err := database.ListKeys("")
 	if err != nil {
 		return err
 	}
+	// URL Decode keys
+	// When the library starts doing this this code will no longer be needed
+	keys := make([]string, len(escapedKeys))
+	for i, k := range escapedKeys {
+		unescapedKey, err := url.PathUnescape(k)
+		if err != nil {
+			panic(err)
+		}
+		keys[i] = unescapedKey
+	}
+	log.Printf("Got keys:\n%s\n", strings.Join(keys, "\n"))
+
 	d.keys = keys
 	return nil
 }
@@ -81,11 +96,106 @@ type KeyDir struct {
 	fs.Inode
 
 	cache *Cache
-	path  string
+	// path is guaranteed to be either "" or end with "/"
+	// This is so that the root KeyDir's path can be "" and the corresponding database
+	//  key for a given KeyFile is always f.parent.path + f.key, making subdir keys
+	//  automatically separated with a slash
+	path string
 }
 
 func NewKeyDir(cache *Cache, path string) *KeyDir {
 	return &KeyDir{cache: cache, path: path}
+}
+
+func RemoveEmpty(in []string) []string {
+	out := make([]string, 0)
+	for _, i := range in {
+		if i != "" {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// A file tree is an in-memory representation of files and directories.
+type FileTree struct {
+	files map[string]bool
+	dirs  map[string]*FileTree
+}
+
+func NewFileTree() *FileTree {
+	return &FileTree{files: make(map[string]bool), dirs: make(map[string]*FileTree)}
+}
+
+func (t *FileTree) GetDir(p string) *FileTree {
+	d, exists := t.dirs[p]
+	if exists {
+		return d
+	}
+	n := NewFileTree()
+	t.dirs[p] = n
+	return n
+}
+
+func (t *FileTree) Add(path []string) {
+	if len(path) == 0 {
+		return
+	}
+
+	curr := t
+	isDir := path[len(path)-1] == ""
+	cleanPath := RemoveEmpty(path)
+	if len(cleanPath) == 0 {
+		return
+	}
+
+	last := len(cleanPath) - 1
+	for _, p := range cleanPath[:last] {
+		curr = curr.GetDir(p)
+	}
+
+	if isDir {
+		curr.dirs[cleanPath[last]] = NewFileTree()
+	} else {
+		curr.files[cleanPath[last]] = true
+	}
+}
+
+func (t *FileTree) AddString(path string) {
+	t.Add(strings.Split(path, "/"))
+}
+
+func (t *FileTree) Show(indent int) {
+	for p, d := range t.dirs {
+		fmt.Printf("%s%s/\n", strings.Repeat(" ", indent), p)
+		d.Show(indent + 2)
+	}
+	for f := range t.files {
+		fmt.Printf("%s%s\n", strings.Repeat(" ", indent), f)
+	}
+}
+
+func (t *FileTree) ToDirEntries(ctx context.Context, r *KeyDir) []fuse.DirEntry {
+	numDirs := len(t.dirs)
+	out := make([]fuse.DirEntry, numDirs+len(t.files))
+	i := 0
+	for dirPath := range t.dirs {
+		out[i] = fuse.DirEntry{
+			Name: dirPath,
+			Ino:  0,
+			Mode: fuse.S_IFDIR,
+		}
+		i++
+	}
+	for filePath := range t.files {
+		out[i] = fuse.DirEntry{
+			Name: filePath,
+			Ino:  0,
+			Mode: fuse.S_IFREG,
+		}
+		i++
+	}
+	return out
 }
 
 var _ = (fs.NodeReaddirer)((*KeyDir)(nil))
@@ -94,25 +204,40 @@ func (r *KeyDir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	// Readdir should be a way to invalidate the cache immediately and it should show the
 	//  latest data, so flush cache immediately whenever this is called
 	r.cache.Flush()
-	keys := r.cache.keys
-
-	entries := make([]fuse.DirEntry, len(keys))
-	for i, k := range keys {
-		entries[i] = fuse.DirEntry{
-			Name: k,
-			Ino:  0, // 0 = auto-generate the number
-			Mode: fuse.S_IFREG,
+	allKeys := r.cache.keys
+	// Filter keys to be just the ones in this directory
+	var keys []string
+	if r.path == "" {
+		keys = allKeys
+	} else {
+		keys = make([]string, 0)
+		// safe to append "/" because we already checked that r.path != ""
+		prefix := r.path
+		prefixLen := len(prefix)
+		for _, k := range allKeys {
+			if strings.HasPrefix(k, prefix) && len(k) > prefixLen {
+				keys = append(keys, k[prefixLen:])
+			}
 		}
 	}
+	log.Printf("keys in '%s': \n%s\n", r.path, strings.Join(keys, "\n"))
 
-	return fs.NewListDirStream(entries), fs.OK
+	tree := NewFileTree()
+	for _, k := range keys {
+		tree.AddString(k)
+	}
+	log.Println("tree:")
+	tree.Show(0)
+
+	return fs.NewListDirStream(tree.ToDirEntries(ctx, r)), fs.OK
 }
 
 var _ = (fs.NodeUnlinker)((*KeyDir)(nil))
 
 func (r *KeyDir) Unlink(ctx context.Context, name string) syscall.Errno {
 	// No need to check for existence
-	err := database.Delete(r.path + name)
+	// See above warnings about urlencoding
+	err := database.Delete(url.PathEscape(MakeKey(r.path, name)))
 	if err != nil {
 		panic(err)
 	}
@@ -123,14 +248,31 @@ type KeyFile struct {
 	fs.Inode
 
 	parent *KeyDir
-	key    string
+	// Key holds the full database key that this file corresponds to
+	key string
 }
 
 func NewKeyFile(parent *KeyDir, key string) KeyFile {
 	return KeyFile{parent: parent, key: key}
 }
 
-func (r *KeyDir) NewKeyInode(ctx context.Context, key string) *fs.Inode {
+func MakeKey(ppath string, key string) string {
+	return ppath + key
+}
+
+func (r *KeyDir) NewKeyDirInode(ctx context.Context, name string) *fs.Inode {
+	stable := fs.StableAttr{
+		Mode: fuse.S_IFDIR,
+		Ino:  0,
+	}
+	operations := NewKeyDir(r.cache, name+"/")
+
+	child := r.NewInode(ctx, operations, stable)
+
+	return child
+}
+
+func (r *KeyDir) NewKeyFileInode(ctx context.Context, key string) *fs.Inode {
 	stable := fs.StableAttr{
 		Mode: fuse.S_IFREG,
 		Ino:  0,
@@ -144,25 +286,68 @@ func (r *KeyDir) NewKeyInode(ctx context.Context, key string) *fs.Inode {
 	return child
 }
 
+func (r *KeyDir) DirExists(key string) bool {
+	// A single key a/ means an empty directory.
+	dirKey := key + "/"
+	if r.cache.KeyInCache(dirKey) {
+		return true
+	}
+	// Check for contained files
+	// a/ is valid if there are any keys that start with a/ (files/directories inside a/)
+	for _, k := range r.cache.keys {
+		if strings.HasPrefix(k, dirKey) {
+			return true
+		}
+	}
+	return false
+}
+
 var _ = (fs.NodeLookuper)((*KeyDir)(nil))
 
-func (r *KeyDir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	key := r.path + name
+func (r *KeyDir) Lookup(
+	ctx context.Context,
+	name string,
+	out *fuse.EntryOut,
+) (*fs.Inode, syscall.Errno) {
+	key := MakeKey(r.path, name)
 	log.Printf("STATing key %s\n", key)
 	// Ensure that the key exists
 	if r.cache.KeyInCache(key) {
-		return r.NewKeyInode(ctx, key), 0
+		return r.NewKeyFileInode(ctx, key), syscall.F_OK
+	}
+	// Check if it is a directory
+	if r.DirExists(key) {
+		return r.NewKeyDirInode(ctx, key), syscall.F_OK
 	}
 
 	return nil, syscall.ENOENT
+}
+
+var _ = (fs.NodeMkdirer)((*KeyDir)(nil))
+
+func (r *KeyDir) Mkdir(
+	ctx context.Context,
+	name string,
+	mode uint32,
+	out *fuse.EntryOut,
+) (*fs.Inode, syscall.Errno) {
+	key := MakeKey(r.path, name) + "/"
+	log.Printf("KeyDir %s: Mkdir %s with mode %d => key %s\n", r.path, name, mode, key)
+	// temporary HACK: client does not URL encode keys so do it ourself
+	// remove this once the library starts encoding so we don't double encode
+	err := database.Set(url.PathEscape(key), "")
+	if err != nil {
+		panic(err)
+	}
+	return r.NewKeyDirInode(ctx, key), syscall.F_OK
 }
 
 var _ = (fs.NodeAccesser)((*KeyFile)(nil))
 
 func (r *KeyFile) Access(ctx context.Context, mask uint32) syscall.Errno {
 	// Anyone can access this filesystem (ignore permission checks).
-	// This squelches the confirm prompt from rm when trying to remove a key because the prompt is
-	//  caused by a lack of write permissions
+	// This squelches the confirm prompt from rm when trying to remove a key because the
+	//  prompt is caused by a lack of write permissions
 	return syscall.F_OK
 }
 
@@ -187,8 +372,10 @@ func (fh *bytesFileHandle) Read(ctx context.Context, dest []byte, off int64) (fu
 
 func (f *KeyFile) OpenRead(ctx context.Context) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	// Read key
-	log.Printf("Opening database key %s for reading\n", f.key)
-	val, err := database.Get(f.key)
+	key := f.key
+	log.Printf("Opening database key %s for reading\n", key)
+	// see other warnings about urlencoding
+	val, err := database.Get(url.PathEscape(key))
 	if err != nil {
 		if err == database.ErrNotFound {
 			return nil, 0, syscall.ENOENT
@@ -235,7 +422,8 @@ func (f *KeyWriter) Write(ctx context.Context, data []byte, off int64) (written 
 	defer f.mu.Unlock()
 
 	sz := int64(len(data))
-	log.Printf("Storing %d bytes in memory for key %s", sz, f.key)
+	key := f.key
+	log.Printf("Storing %d bytes in memory for key %s", sz, key)
 	if off+sz > int64(len(f.content)) {
 		f.Resize(uint64(off + sz))
 	}
@@ -250,9 +438,10 @@ func (f *KeyWriter) Flush(ctx context.Context) syscall.Errno {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	log.Printf("Flushing %d bytes to key %s\n", len(f.content), f.key)
+	key := f.key
+	log.Printf("Flushing %d bytes to key %s\n", len(f.content), key)
 	// Actually write the content to the database
-	err := database.Set(f.key, string(f.content))
+	err := database.Set(url.PathEscape(key), string(f.content))
 	if err != nil {
 		panic(err)
 	}
@@ -297,7 +486,7 @@ func (r *KeyDir) Create(
 	mode uint32,
 	out *fuse.EntryOut,
 ) (node *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
-	child := r.NewKeyInode(ctx, name)
+	child := r.NewKeyFileInode(ctx, name)
 	writer := NewKeyWriter(r, name)
 	log.Printf("Creating key %s\n", name)
 	return child, writer, fuse.FOPEN_NONSEEKABLE | fuse.FOPEN_DIRECT_IO, syscall.F_OK
