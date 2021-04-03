@@ -246,6 +246,31 @@ func (r *KeyDir) Unlink(ctx context.Context, name string) syscall.Errno {
 	if err != nil {
 		panic(err)
 	}
+	r.cache.Flush()
+	return syscall.F_OK
+}
+
+var _ = (fs.NodeRmdirer)((*KeyDir)(nil))
+
+func (r *KeyDir) Rmdir(ctx context.Context, name string) syscall.Errno {
+	// Flush to make sure we are deleting ALL subitems
+	r.cache.Flush()
+	r.cache.mu.Lock()
+	defer r.cache.mu.Unlock()
+
+	prefix := r.Key(name) + "/"
+	for _, k := range r.cache.keys {
+		if strings.HasPrefix(k, prefix) {
+			log.Printf("Deleting key %s", k)
+			err := database.Delete(url.PathEscape(k))
+			if err != nil {
+				panic(err)
+			}
+		}
+	}
+	r.cache.mu.Unlock()
+	r.cache.Flush()
+	r.cache.mu.Lock() // so that defer does not cause unintended behavior
 	return syscall.F_OK
 }
 
