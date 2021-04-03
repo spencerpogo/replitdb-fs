@@ -512,13 +512,24 @@ func SetOwner(out *fuse.AttrOut) {
 	out.Owner.Gid = uint32(gid)
 }
 
+func SetAttrs(out *fuse.AttrOut, isDir bool) {
+	SetOwner(out)
+	if isDir {
+		out.Mode = fuse.S_IFDIR | 0750 // u=rwx,g=rx
+		log.Println("out.Mode = 750", out.Mode)
+	} else {
+		out.Mode = fuse.S_IFREG | 0600
+		log.Println("out.Mode = 600", out.Mode)
+	}
+}
+
 // Implement GetAttr to provide owner
 var _ = (fs.NodeGetattrer)((*KeyFile)(nil))
 
 func (bn *KeyFile) Getattr(
 	ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut,
 ) syscall.Errno {
-	SetOwner(out)
+	SetAttrs(out, false)
 	return 0
 }
 
@@ -528,7 +539,7 @@ var _ = (fs.NodeGetattrer)((*KeyDir)(nil))
 func (bn *KeyDir) Getattr(
 	ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut,
 ) syscall.Errno {
-	SetOwner(out)
+	SetAttrs(out, true)
 	return 0
 }
 
@@ -541,6 +552,7 @@ func (f *KeyFile) Setattr(
 	in *fuse.SetAttrIn,
 	out *fuse.AttrOut,
 ) syscall.Errno {
+	SetAttrs(out, false)
 	return 0
 }
 
@@ -553,6 +565,7 @@ func (f *KeyDir) Setattr(
 	in *fuse.SetAttrIn,
 	out *fuse.AttrOut,
 ) syscall.Errno {
+	SetAttrs(out, true)
 	return 0
 }
 
