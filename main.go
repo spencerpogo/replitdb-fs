@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os/user"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -392,7 +394,9 @@ type bytesFileHandle struct {
 // bytesFileHandle allows reads
 var _ = (fs.FileReader)((*bytesFileHandle)(nil))
 
-func (fh *bytesFileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+func (fh *bytesFileHandle) Read(
+	ctx context.Context, dest []byte, off int64,
+) (fuse.ReadResult, syscall.Errno) {
 	end := off + int64(len(dest))
 	if end > int64(len(fh.content)) {
 		end = int64(len(fh.content))
@@ -403,7 +407,9 @@ func (fh *bytesFileHandle) Read(ctx context.Context, dest []byte, off int64) (fu
 	return fuse.ReadResultData(fh.content[off:end]), 0
 }
 
-func (f *KeyFile) OpenRead(ctx context.Context) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+func (f *KeyFile) OpenRead(ctx context.Context) (
+	fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno,
+) {
 	// Read key
 	key := f.key
 	log.Printf("Opening database key %s for reading\n", key)
@@ -450,7 +456,9 @@ func (bn *KeyWriter) Resize(sz uint64) {
 // KeyFile allows write
 var _ = (fs.FileWriter)((*KeyWriter)(nil))
 
-func (f *KeyWriter) Write(ctx context.Context, data []byte, off int64) (written uint32, errno syscall.Errno) {
+func (f *KeyWriter) Write(
+	ctx context.Context, data []byte, off int64,
+) (written uint32, errno syscall.Errno) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -484,28 +492,75 @@ func (f *KeyWriter) Flush(ctx context.Context) syscall.Errno {
 	return syscall.F_OK
 }
 
-// Implement GetAttr to provide size
+func SetOwner(out *fuse.AttrOut) {
+	currentUser, err := user.Current()
+	if err != nil {
+		panic(err)
+	}
+	uid, err := strconv.ParseUint(currentUser.Uid, 10, 32)
+	// this will panic on windows but whatever
+	if err != nil {
+		panic(err)
+	}
+	gid, err := strconv.ParseUint(currentUser.Gid, 10, 32)
+	if err != nil {
+		panic(err)
+	}
+	log.Printf("Uid %d, Gid %d\n", uid, gid)
+	// conversion is safe because 32 was passed to ParseUint
+	out.Owner.Uid = uint32(uid)
+	out.Owner.Gid = uint32(gid)
+}
+
+// Implement GetAttr to provide owner
 var _ = (fs.NodeGetattrer)((*KeyFile)(nil))
 
-func (bn *KeyFile) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+func (bn *KeyFile) Getattr(
+	ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut,
+) syscall.Errno {
+	SetOwner(out)
+	return 0
+}
+
+// Implement GetAttr to provide owner
+var _ = (fs.NodeGetattrer)((*KeyDir)(nil))
+
+func (bn *KeyDir) Getattr(
+	ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut,
+) syscall.Errno {
+	SetOwner(out)
 	return 0
 }
 
 // Implement Setattr to support truncation
 var _ = (fs.NodeSetattrer)((*KeyFile)(nil))
 
-func (f *KeyFile) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+func (f *KeyFile) Setattr(
+	ctx context.Context,
+	fh fs.FileHandle,
+	in *fuse.SetAttrIn,
+	out *fuse.AttrOut,
+) syscall.Errno {
 	return 0
 }
 
 // Implement Setattr to make some applications happy
 var _ = (fs.NodeSetattrer)((*KeyDir)(nil))
 
-func (f *KeyDir) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+func (f *KeyDir) Setattr(
+	ctx context.Context,
+	fh fs.FileHandle,
+	in *fuse.SetAttrIn,
+	out *fuse.AttrOut,
+) syscall.Errno {
 	return 0
 }
 
-func (f *KeyFile) OpenWrite(ctx context.Context) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+func (f *KeyFile) OpenWrite(ctx context.Context) (
+	fh fs.FileHandle,
+	fuseFlags uint32,
+	errno syscall.Errno,
+) {
 	log.Printf("Opening key %s for writing\n", f.key)
 	return NewKeyWriter(f.parent, f.key), fuse.FOPEN_NONSEEKABLE, syscall.F_OK
 }
@@ -527,7 +582,9 @@ func (r *KeyDir) Create(
 
 var _ = (fs.NodeOpener)((*KeyFile)(nil))
 
-func (f *KeyFile) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+func (f *KeyFile) Open(ctx context.Context, flags uint32) (
+	fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno,
+) {
 	log.Printf("Open flags: %d\n", flags)
 	if flags&(syscall.O_RDWR|syscall.O_WRONLY) != 0 {
 		return f.OpenWrite(ctx)
