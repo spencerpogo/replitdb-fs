@@ -19,6 +19,7 @@ import (
 const CACHE_LIFETIME = 5 * time.Second
 
 type Cache struct {
+	mu sync.Mutex
 	// A cache of the current list of keys in the database.
 	// It is re-populated with fresh data every time READDIR is called on the filessystem
 	//  and on a loop every CACHE_LIFETIME (re-populating will delay the auto-refresh).
@@ -27,8 +28,8 @@ type Cache struct {
 	flushTicker *time.Ticker
 }
 
-func NewCache() Cache {
-	return Cache{
+func NewCache() *Cache {
+	return &Cache{
 		keys: make([]string, 0),
 	}
 }
@@ -40,6 +41,8 @@ func (d *Cache) ResetFlushTicker() {
 }
 
 func (d *Cache) Flush() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	log.Println("Flushing key cache")
 
 	// If the cache is being flushed now, reset the flush ticker so that it isn't
@@ -204,6 +207,8 @@ func (r *KeyDir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	// Readdir should be a way to invalidate the cache immediately and it should show the
 	//  latest data, so flush cache immediately whenever this is called
 	r.cache.Flush()
+	r.cache.mu.Lock()
+	defer r.cache.mu.Unlock()
 	allKeys := r.cache.keys
 	// Filter keys to be just the ones in this directory
 	var keys []string
@@ -309,6 +314,8 @@ func (r *KeyDir) Lookup(
 	name string,
 	out *fuse.EntryOut,
 ) (*fs.Inode, syscall.Errno) {
+	r.cache.mu.Lock()
+	defer r.cache.mu.Unlock()
 	key := r.Key(name)
 	log.Printf("STATing key %s\n", key)
 	// Ensure that the key exists
@@ -339,6 +346,7 @@ func (r *KeyDir) Mkdir(
 	if err != nil {
 		panic(err)
 	}
+	r.cache.Flush()
 	return r.NewKeyDirInode(ctx, key), syscall.F_OK
 }
 
@@ -521,7 +529,7 @@ func main() {
 	cacheFlushQuit := make(chan bool)
 	go cache.CacheFlushLoop(cacheFlushQuit)
 
-	root := NewKeyDir(&cache, "")
+	root := NewKeyDir(cache, "")
 
 	opts := &fs.Options{}
 	opts.Debug = *debug
